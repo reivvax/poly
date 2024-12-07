@@ -3,230 +3,263 @@
 
 #include <cstddef>
 #include <type_traits>
-#include <array>
+#include <concepts>
 #include <algorithm>
+#include <array>
+#include <iostream> // debug
 
 template <typename T, std::size_t N>
 class poly;
 
-
-//T = poly<U, M>& || T = poly<U, M>&&
 namespace detail {
-
     template <typename T>
     struct is_poly : public std::false_type
     {};
 
-    // JP specjalizacja
     template <typename T, std::size_t N>
     struct is_poly<poly<T, N>> : public std::true_type
     {};
 
     template <typename T>
-    constexpr bool is_poly_v = is_poly<T>::value;
+    inline static constexpr bool is_poly_v = is_poly<T>::value;
 
     template <typename T>
-    concept is_poly_ref = std::is_reference_v<T> && detail::is_poly_v<std::remove_reference_t<T>>;
+    concept is_any_poly = detail::is_poly_v<std::decay_t<T>>;
 
-    template <typename T>
-    concept is_const_lref = std::is_lvalue_reference_v<T> && std::is_const_v<std::remove_reference_t<T>>;
+    template <typename T, typename U>
+    struct mul_type : std::common_type<T, U> {};
 
-    template <typename T>
-    concept is_good_poly_ref = detail::is_poly_ref<T> && (detail::is_const_lref<T> || std::is_rvalue_reference_v<T>);
-
-    template <typename T>
-    concept is_coefficient = requires (T x, T y)
-    {
-        {x + y} -> std::same_as<T>;
-        {x - y} -> std::same_as<T>;
-        {x * y} -> std::same_as<T>;
-        {-x} -> std::same_as<T>;
-//        {T() == T{}} -> std::convertible_to<bool>; // JP
+    template <typename T, typename U, std::size_t N>
+    struct mul_type<T, poly<U, N>> {
+        using type = poly<typename detail::mul_type<T, U>::type, N>;
     };
 
-    template <typename T>
-    concept is_at_return_t = true; // JP
+    template <typename T, std::size_t N, typename U>
+    struct mul_type<poly<T, N>, U> : detail::mul_type<U, poly<T, N>>
+    {};
+
+    template <typename T, std::size_t N, typename U, std::size_t M>
+    struct mul_type<poly<T, N>, poly<U, M>> {
+        using type = poly<typename detail::mul_type<T, U>::type, 0>;
+    };
+
+    template <typename T, std::size_t N, typename U, std::size_t M>
+    requires (N > 0 && M > 0)
+    struct mul_type<poly<T, N>, poly<U, M>> {
+        using type = poly<typename detail::mul_type<T, U>::type, N + M - 1>;
+    };
+
+    template <typename T, typename U>
+    using mul_type_t = typename detail::mul_type<T, U>::type;
 
     template <std::size_t M, std::size_t N>
-    concept leq = M <= N;
-
-    template <typename U, typename T>
-    concept rref_convertible_to = std::is_rvalue_reference_v<U&&> && std::convertible_to<std::decay_t<U>, T>;
-
-
-    template<typename T>
-    struct default_val {
-         constexpr static T value = T();
-    };
-
-    template <typename T>
-    requires std::is_arithmetic_v<T>
-    struct default_val<T> {
-        constexpr static T value = static_cast<T>(0);
-    }; // JP
-
-    /*template <typename U, typename T>
-    concept rref_convertible_to = std::is_rvalue_reference_v<U> && std::convertible_to<std::remove_cvref_t<U>, T>*/  // JP dlaczego nie dziala
+    concept leq = (M <= N);
 
 }
 
 
+namespace std {
+    template <typename T, std::size_t N, typename U>
+    struct common_type<poly<T, N>, U> {
+        using type = poly<typename std::common_type<T, U>::type, N>;
+    };
+
+    template <typename U, typename T, std::size_t N>
+    struct common_type<U, poly<T, N>> : std::common_type<poly<T, N>, U> {};
+
+    template <typename T, std::size_t N, typename U, std::size_t M>
+    struct common_type<poly<T, N>, poly<U, M>> {
+        using type = poly<typename std::common_type<T, U>::type, static_cast<std::size_t>(std::max(N, M))>;
+    };
+}
 
 template <typename T, std::size_t N = 0>
 class poly {
-private:
     std::array<T, static_cast<std::size_t>(std::max(N, 1UL))> coefficients;
 
 public:
-    // konstruktory
-    /*constexpr poly(void) {
-        static_assert(coefficients.size() == 1UL);
-        // coefficients[0] = T();
-    }*/
-   constexpr poly(void) = default;
+    using type = T;
 
-    template <std::convertible_to<T> U, std::size_t M = 0>
-    requires detail::leq<M, N>
+    constexpr poly(void) = default;
+
+    constexpr T const& operator[](std::size_t i) const {
+        return coefficients[i];
+    }
+
+    constexpr T& operator[](std::size_t i) {
+        return coefficients[i];
+    }
+
+    template <std::convertible_to<T> U, std::size_t M>
+    requires (detail::leq<M, N>)
     constexpr poly(poly<U, M> const& rhs) {
-        for (std::size_t i = 0; i < N; ++i)
-            coefficients[i] = i < M ? rhs.coefficients[i] : detail::default_val<T>::value; // loop
-    }
-    // JP deduction guides (-> poly<std::common_type_t<T, U>, M>)?
-
-    template <std::convertible_to<T> U, std::size_t M = 0>
-    requires detail::leq<M, N>
-    constexpr poly(poly<U, M>&& rhs) {
-        for (std::size_t i = 0; i < N; ++i)
-            coefficients[i] = i < M ? std::move(rhs.coefficients[i]) : detail::default_val<T>::value;
-    } // JP to samo
-
-    template <std::convertible_to<T> U>
-    constexpr poly(U u) : coefficients(std::array<std::common_type_t<T, U>, 1>{u}) {} // JP to samo
-
-
-    template <typename... Args>
-    requires (sizeof...(Args) <= N && (detail::rref_convertible_to<Args, T> && ...))
-    constexpr poly(Args&&... args) : coefficients{std::forward<Args>(args)...} {}
-
-
-
-
-    // poly<poly<int, 1>> p(poly(1)); uniemozliwic zrobienie czegos takiego
-
-
-    template <std::convertible_to<T> U, std::size_t M = 0>
-    constexpr poly& operator=(poly<U, M> const& rhs) requires detail::leq<M, N> {
-        /*coefficients = rhs.coefficients;
-        return *this;*/
-        for (std::size_t i = 0; i < N; ++i)
-          coefficients[i] = i < M ? rhs.coefficients[i] : detail::default_val<T>::value;
-        return *this;
-    }
-
-    template <std::convertible_to<T> U, std::size_t M = 0>
-    constexpr poly& operator=(poly<U, M>&& rhs) requires detail::leq<M, N> {
-        for (std::size_t i = 0; i < N; ++i)
-            coefficients[i] = i < M ? std::move(rhs.coefficients[i]) : detail::default_val<T>::value; // T()
-        return *this;
-    }
-
-
-    // arytmetyka
-    /*template <std::convertible_to<T> U, std::size_t M = 0>
-    constexpr poly& operator+=(poly<U, M> const& rhs);*/
-
-    template <std::convertible_to<T> U, std::size_t M = 0>
-    requires (M <= N) && requires (T t, U u) {
-        t += u;
-    }
-    constexpr poly& operator+=(poly<U, M> const& rhs) {
+        std::cerr << "copy ctor called\n";
         for (std::size_t i = 0; i < M; ++i)
-            coefficients[i] += rhs.coefficients[i];
+            coefficients[i] = rhs[i];
+    }
+
+    template <std::convertible_to<T> U, std::size_t M = 0>
+    requires (detail::leq<M, N>)
+    constexpr poly(poly<U, M>&& rhs) {
+        std::cerr << "move ctor called\n";
+        for (std::size_t i = 0; i < M; ++i)
+            coefficients[i] = std::move(rhs[i]);
+    }
+
+
+    template <std::convertible_to<T> U>
+    requires std::is_rvalue_reference_v<U&&>
+    constexpr poly(U&& u) : coefficients{static_cast<T>(std::move(u))} {
+        std::cerr << "move conversion ctor called\n";
+    }
+
+    template <std::convertible_to<T> U>
+    constexpr poly(U const& u) : coefficients{static_cast<T>(u)} {
+        //std::cerr << "copy conversion ctor called\n";
+    }
+
+    template <std::convertible_to<T>... Args>
+    requires (detail::leq<sizeof...(Args), N> && detail::leq<2, sizeof...(Args)>)
+    constexpr poly(Args&&... args) : coefficients{static_cast<T>(std::forward<Args>(args))...} {
+        //std::cerr << "variadic ctor called\n";
+    };
+
+    template <std::convertible_to<T> U, std::size_t M = 0>
+    requires (detail::leq<M, N>)
+    constexpr poly<T, N>& operator=(poly<U, M> const& rhs) {
+        //std::cerr << "copy assignment operator called\n";
+        for (std::size_t i = 0; i < N; ++i)
+            coefficients[i] = i < M ? rhs[i] : T();
+        return *this;
+    }
+
+    template <std::convertible_to<T> U, std::size_t M = 0>
+    requires (detail::leq<M, N>)
+    constexpr poly<T, N>& operator=(poly<U, M>&& rhs) {
+        //std::cerr << "move assignment operator called\n";
+        for (std::size_t i = 0; i < N; ++i)
+            coefficients[i] = i < M ? std::move(rhs[i]) : T();
+        return *this;
+    }
+
+    template <std::convertible_to<T> U, std::size_t M = 0>
+    requires (detail::leq<M, N>)
+    constexpr poly<T, N>& operator+=(poly<U, M> const& rhs) {
+        for (std::size_t i = 0; i < M; ++i)
+            coefficients[i] += rhs[i];
         return *this;
     }
 
     template <std::convertible_to<T> U>
-    constexpr poly& operator+=(U const& rhs) {
+    constexpr poly<T, N>& operator+=(U const& rhs) {
         coefficients[0] += rhs;
         return *this;
     }
 
     template <std::convertible_to<T> U, std::size_t M = 0>
-    constexpr poly& operator-=(poly<U, M> const& rhs) {
+    requires (detail::leq<M, N>)
+    constexpr poly<T, N>& operator-=(poly<U, M> const& rhs) {
         for (std::size_t i = 0; i < M; ++i)
-            coefficients[i] -= rhs.coefficients[i];
+            coefficients[i] -= rhs[i];
         return *this;
     }
 
     template <std::convertible_to<T> U>
-    constexpr poly& operator-=(U const& rhs) {
+    constexpr poly<T, N>& operator-=(U const& rhs) {
         coefficients[0] -= rhs;
         return *this;
     }
 
-    // merge those declarations with those above with some concepts
-
-    template <std::convertible_to<T> U, std::size_t M = 0>
-    constexpr poly& operator*=(poly<U, M> const& rhs);
-
     template <std::convertible_to<T> U>
-    constexpr poly& operator*=(U const& rhs);
-
-    // operatory
-    /*constexpr poly operator+(poly const& lhs, poly const& rhs);
-
-    constexpr poly operator-(poly const& lhs, poly const& rhs);
-
-    constexpr poly operator*(poly const& lhs, poly const& rhs);
-
-    constexpr poly operator-(poly const& rhs);*/
-
-    // working version; possibly replace with concept
-    template <std::size_t I>
-    requires detail::leq<I, N>
-    constexpr T const& operator[](std::size_t i) const {
-        return coefficients[i];
+    constexpr poly<T, N>& operator*=(U const& rhs) {
+        for (std::size_t i = 0; i < N; ++i)
+            coefficients[i] *= rhs;
+        return *this;
     }
 
-    // working version; possibly replace with concept; possibly remove const from signature
-//    template <std::size_t I>
-//    requires detail::leq<I, N>
-//    constexpr T& operator[](std::size_t i) const {
-//        return coefficients[i];
-//    }
-
-    constexpr T const& operator[](std::size_t index) const {
-        return coefficients[index];
-    }
-
-    constexpr T& operator[](std::size_t index) {
-        return coefficients[index];
-    } // JP
-
-
-    // logika
-    constexpr size_t size() {
+    constexpr std::size_t size() const {
         return N;
     }
 
-
-    poly cross(poly const& p, poly const& q);
+//    template<typename = void>
+//    auto at(Args... args) {
+//
+//    }
+//
+//    template <typename U, typename... Args>
+//    auto at();
 
     template <typename U, std::size_t M>
     constexpr friend poly<poly<U, M>, 1> const_poly(poly<U, M> const& rhs);
 
 };
 
-template <typename T, std::size_t N = 0>
-constexpr poly<poly<T, N>, 1> const_poly(poly<T, N> const& rhs) {
-    poly<poly<T, N>, 1> tmp;
-    tmp.coefficients[0] = rhs;
-    return tmp;
+template <typename T, typename U>
+requires (detail::is_any_poly<T> || detail::is_any_poly<U>)
+constexpr auto operator+(T const& lhs, U const& rhs) {
+    using CommonType = std::common_type_t<std::decay_t<decltype(lhs)>, std::decay_t<decltype(rhs)>>;
+    CommonType ret_val = detail::is_any_poly<T> ? std::forward<T const&>(lhs) : std::forward<U const&>(rhs);
+
+    if constexpr (!detail::is_any_poly<T>)
+        ret_val += lhs;
+    else
+        ret_val += rhs;
+    return ret_val;
 }
 
+template <typename T, typename U>
+requires (detail::is_any_poly<T> || detail::is_any_poly<U>)
+constexpr auto operator-(T const& lhs, U const& rhs) {
+    using CommonType = std::common_type_t<std::decay_t<decltype(lhs)>, std::decay_t<decltype(rhs)>>;
+    CommonType ret_val = detail::is_any_poly<T> ? std::forward<T const&>(lhs) : std::forward<U const&>(rhs);
+
+    if constexpr (!detail::is_any_poly<T>)
+        ret_val -= lhs;
+    else
+        ret_val -= rhs;
+    return ret_val;
+}
+
+template <typename T, std::size_t N = 0>
+constexpr auto operator-(poly<T, N> const& p) {
+    auto ret_val = p;
+    ret_val *= -T();
+    return ret_val;
+}
+
+template <typename T, typename U>
+requires (detail::is_any_poly<T> || detail::is_any_poly<U>)
+constexpr auto operator*(T const& lhs, U const& rhs) {
+    using MulType = detail::mul_type_t<std::decay_t<decltype(lhs)>, std::decay_t<decltype(rhs)>>;
+    MulType ret_val{};
+
+    if constexpr (ret_val.size() != 0) {
+         for (std::size_t i = 0; i < lhs.size(); ++i) {
+             for (std::size_t j = 0; j < rhs.size(); ++j) {
+                 if constexpr (std::convertible_to<decltype(rhs[j]), decltype(lhs[i])>) {
+                     auto tmp = lhs[i];
+                     tmp *= rhs[j];
+                     ret_val[i + j] += tmp;
+                 } else {
+                     auto tmp = rhs[j];
+                     tmp *= lhs[i];
+                     ret_val[i + j] += tmp;
+                 }
+             }
+         }
+     }
+     return ret_val;
+}
+
+template <typename T, std::size_t N = 0>
+constexpr poly<poly<T, N>, 1> const_poly(poly<T, N> const& rhs) {
+    poly<poly<T, N>, 1> ret_val;
+    ret_val.coefficients[0] = rhs;
+    return ret_val;
+}
 
 template <typename... Args>
-requires (sizeof...(Args) >= 2)
+requires (sizeof...(Args) >= 1)
 poly(Args&&...) -> poly<std::common_type_t<Args...>, sizeof...(Args)>;
 
 #endif

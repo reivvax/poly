@@ -10,6 +10,8 @@ where the coefficients $a_i$ are of type T. The value N represents the size of t
 
 To extend the implementation to multivariate polynomials, the type T itself can be another poly. In general, a polynomial of m variables is represented recursively using the poly class up to depth m, with the innermost coefficient type no longer being a poly.
 
+Compile with `-std=c++20`.
+
 # Example:
 ```cpp
 poly<poly<poly<int, 3>, 2>, 4>
